@@ -1,0 +1,12 @@
+services:
+  localmediaservice:
+    build:
+      context: ./LocalMediaService.Web
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - MEDIA_ROOT=/media
+    volumes:
+      - ./media:/media:ro
+    restart: unless-stopped
