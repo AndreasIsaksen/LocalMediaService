@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Local Media</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <a class="brand" href="/" aria-label="Local Media home">
+            <span class="brand-mark" aria-hidden="true">LM</span>
+            <span>Local Media</span>
+        </a>
+        <nav class="header-actions" aria-label="Portal actions">
+            <span id="session-user" class="session-user"></span>
+            <button id="logout-button" class="button button-ghost" type="button">Sign out</button>
+        </nav>
+    </header>
+
+    <main class="page-shell">
+        <section class="hero" aria-labelledby="hero-title">
+            <div class="hero-copy">
+                <div class="eyebrow">Your home screen</div>
+                <h1 id="hero-title">Everything you watch,<br><span>one place to begin.</span></h1>
+                <p>Launch your subscriptions and play files from your private local library.</p>
+            </div>
+            <div class="hero-orbit" aria-hidden="true">
+                <div class="orbit-ring"></div>
+                <div class="orbit-core">▶</div>
+                <span class="orbit-dot dot-one"></span>
+                <span class="orbit-dot dot-two"></span>
+                <span class="orbit-dot dot-three"></span>
+            </div>
+        </section>
+
+        <section class="content-section" aria-labelledby="streaming-heading">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow">Subscriptions</div>
+                    <h2 id="streaming-heading">Streaming services</h2>
+                </div>
+                <button id="add-account-button" class="button button-secondary" type="button">+ Save account</button>
+            </div>
+            <p class="section-note">Services open on their official websites. Your provider controls playback, cookies, MFA, and DRM.</p>
+            <div id="services" class="service-grid" aria-live="polite">
+                <div class="skeleton-card"></div>
+                <div class="skeleton-card"></div>
+                <div class="skeleton-card"></div>
+            </div>
+        </section>
+
+        <section class="content-section library-section" aria-labelledby="library-heading">
+            <div class="section-heading library-heading-row">
+                <div>
+                    <div class="eyebrow">External drive</div>
+                    <h2 id="library-heading">Local library</h2>
+                </div>
+                <div class="library-actions">
+                    <label class="search-box">
+                        <span class="visually-hidden">Search library</span>
+                        <input id="media-search" type="search" placeholder="Search titles or folders…" autocomplete="off">
+                    </label>
+                    <button id="rescan-button" class="button button-secondary" type="button">Rescan</button>
+                </div>
+            </div>
+            <div id="library-status" class="library-status" aria-live="polite">Scanning your library…</div>
+            <div id="media-groups" class="media-groups"></div>
+        </section>
+    </main>
+
+    <dialog id="player-dialog" class="dialog player-dialog">
+        <div class="dialog-heading">
+            <div>
+                <div id="player-category" class="eyebrow"></div>
+                <h2 id="player-title">Now playing</h2>
+            </div>
+            <button class="icon-button" data-close-dialog="player-dialog" type="button" aria-label="Close player">×</button>
+        </div>
+        <video id="media-player" controls preload="metadata"></video>
+        <div class="player-meta">
+            <span id="player-path"></span>
+            <span id="player-warning" class="compatibility-warning" hidden>Browser support for this container or codec may vary.</span>
+        </div>
+    </dialog>
+
+    <dialog id="account-dialog" class="dialog account-dialog">
+        <div class="dialog-heading">
+            <div>
+                <div class="eyebrow">Encrypted vault</div>
+                <h2>Save a streaming account</h2>
+            </div>
+            <button class="icon-button" data-close-dialog="account-dialog" type="button" aria-label="Close">×</button>
+        </div>
+        <p class="dialog-copy">Credentials are encrypted on disk. The portal cannot sign in or fill passwords on another website; copy them only when you need them.</p>
+        <form id="account-form" class="stack-form">
+            <label>
+                <span>Service</span>
+                <select id="account-service" required></select>
+            </label>
+            <label>
+                <span>Account label</span>
+                <input id="account-label" required maxlength="80" placeholder="Family account">
+            </label>
+            <label>
+                <span>Email or username</span>
+                <input id="account-username" required maxlength="320" autocomplete="off">
+            </label>
+            <label>
+                <span>Provider password</span>
+                <input id="account-password" type="password" required maxlength="1024" autocomplete="new-password">
+            </label>
+            <p id="account-error" class="form-error" role="alert" hidden></p>
+            <div class="dialog-actions">
+                <button class="button button-ghost" data-close-dialog="account-dialog" type="button">Cancel</button>
+                <button class="button button-primary" type="submit">Encrypt and save</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="accounts-dialog" class="dialog accounts-dialog">
+        <div class="dialog-heading">
+            <div>
+                <div class="eyebrow">Encrypted vault</div>
+                <h2 id="accounts-title">Saved accounts</h2>
+            </div>
+            <button class="icon-button" data-close-dialog="accounts-dialog" type="button" aria-label="Close">×</button>
+        </div>
+        <div id="accounts-list" class="accounts-list"></div>
+    </dialog>
+
+    <dialog id="reveal-dialog" class="dialog reveal-dialog">
+        <div class="dialog-heading">
+            <div>
+                <div class="eyebrow">Confirm access</div>
+                <h2>Reveal account</h2>
+            </div>
+            <button class="icon-button" data-close-dialog="reveal-dialog" type="button" aria-label="Close">×</button>
+        </div>
+        <form id="reveal-form" class="stack-form">
+            <input id="reveal-account-id" type="hidden">
+            <label>
+                <span>Portal administrator password</span>
+                <input id="reveal-admin-password" type="password" required autocomplete="current-password">
+            </label>
+            <p id="reveal-error" class="form-error" role="alert" hidden></p>
+            <div id="revealed-fields" class="revealed-fields" hidden>
+                <label>
+                    <span>Username</span>
+                    <input id="revealed-username" readonly>
+                </label>
+                <label>
+                    <span>Password</span>
+                    <input id="revealed-password" readonly>
+                </label>
+                <p class="security-note">Close this window as soon as you have finished.</p>
+            </div>
+            <div class="dialog-actions">
+                <button class="button button-ghost" data-close-dialog="reveal-dialog" type="button">Close</button>
+                <button id="reveal-submit" class="button button-primary" type="submit">Reveal</button>
+            </div>
+        </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/app.js" defer></script>
+</body>
+</html>

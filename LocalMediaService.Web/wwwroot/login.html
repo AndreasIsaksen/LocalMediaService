@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Sign in · Local Media</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="login-page">
+    <main class="login-shell">
+        <section class="login-card" aria-labelledby="login-title">
+            <a class="brand brand-centered" href="/" aria-label="Local Media home">
+                <span class="brand-mark" aria-hidden="true">LM</span>
+                <span>Local Media</span>
+            </a>
+            <div class="eyebrow">Private home portal</div>
+            <h1 id="login-title">Welcome back</h1>
+            <p class="muted">Sign in to browse your library and saved streaming accounts.</p>
+
+            <form id="login-form" class="stack-form">
+                <label>
+                    <span>Username</span>
+                    <input id="username" name="username" autocomplete="username" required autofocus maxlength="80">
+                </label>
+                <label>
+                    <span>Password</span>
+                    <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+                </label>
+                <label class="checkbox-row">
+                    <input id="remember-me" name="rememberMe" type="checkbox">
+                    <span>Keep me signed in on this device</span>
+                </label>
+                <p id="login-error" class="form-error" role="alert" hidden></p>
+                <button class="button button-primary button-wide" type="submit">Sign in</button>
+            </form>
+            <p class="security-note">Use this portal only on your trusted home network or behind HTTPS.</p>
+        </section>
+    </main>
+    <script src="/login.js" defer></script>
+</body>
+</html>

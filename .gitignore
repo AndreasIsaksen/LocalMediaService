@@ -1,2 +1,8 @@
 **/bin/
 **/obj/
+.env
+data/
+media/
+.local-test-data/
+backups/
+local-media-service-ca.crt

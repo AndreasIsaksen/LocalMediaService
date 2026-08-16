@@ -1,125 +1,251 @@
 using System.Net;
+using System.Security.Claims;
+using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
+using LocalMediaService.Web.Endpoints;
+using LocalMediaService.Web.Options;
+using LocalMediaService.Web.Services;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
-
-var mediaRoot = Environment.GetEnvironmentVariable("MEDIA_ROOT");
-if (string.IsNullOrWhiteSpace(mediaRoot))
+if (args is ["--healthcheck", var healthUrl])
 {
-    mediaRoot = "/media";
+    return await RunHealthCheckAsync(healthUrl);
 }
 
-var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+var builder = WebApplication.CreateBuilder(args);
+var requireHttps = builder.Configuration.GetValue($"{PortalSecurityOptions.SectionName}:RequireHttps", true);
+
+builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    ".mp4", ".mkv", ".webm", ".mov", ".avi"
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+});
+
+builder.Services
+    .AddOptions<MediaLibraryOptions>()
+    .Bind(builder.Configuration.GetSection(MediaLibraryOptions.SectionName))
+    .Validate(options => !string.IsNullOrWhiteSpace(options.RootPath), "MediaLibrary:RootPath is required.")
+    .Validate(options => string.IsNullOrEmpty(options.MountSentinelFile) ||
+                         (!Path.IsPathRooted(options.MountSentinelFile) &&
+                          options.MountSentinelFile.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0),
+        "MediaLibrary:MountSentinelFile must be empty or a single filename.")
+    .Validate(options => options.ScanIntervalSeconds is >= 5 and <= 3600,
+        "MediaLibrary:ScanIntervalSeconds must be between 5 and 3600.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddOptions<StorageOptions>()
+    .Bind(builder.Configuration.GetSection(StorageOptions.SectionName))
+    .Validate(options => !string.IsNullOrWhiteSpace(options.DataPath), "Storage:DataPath is required.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddOptions<PortalSecurityOptions>()
+    .Bind(builder.Configuration.GetSection(PortalSecurityOptions.SectionName))
+    .Validate(options => !string.IsNullOrWhiteSpace(options.AdminUsername),
+        "PortalSecurity:AdminUsername is required.")
+    .Validate(options => options.AdminPassword?.Length >= 12,
+        "PortalSecurity:AdminPassword must contain at least 12 characters.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddOptions<CredentialStoreOptions>()
+    .Bind(builder.Configuration.GetSection(CredentialStoreOptions.SectionName))
+    .Validate(options => CredentialEncryption.IsValidKey(options.EncryptionKey),
+        "CredentialStore:EncryptionKey must be a Base64-encoded 32-byte key.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddOptions<StreamingServicesOptions>()
+    .Bind(builder.Configuration.GetSection(StreamingServicesOptions.SectionName))
+    .Validate(options => StreamingServiceCatalog.IsValid(options.Services),
+        "Every streaming service needs a unique safe id, a name, and HTTPS home/login URLs.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "LocalMediaService.Auth";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.IsEssential = true;
+        options.Cookie.SameSite = SameSiteMode.Strict;
+        options.Cookie.SecurePolicy = requireHttps
+            ? CookieSecurePolicy.Always
+            : CookieSecurePolicy.SameAsRequest;
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        options.SlidingExpiration = true;
+        options.LoginPath = "/login";
+        options.Events.OnRedirectToLogin = context =>
+        {
+            if (context.Request.Path.StartsWithSegments("/api"))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return Task.CompletedTask;
+            }
+
+            context.Response.Redirect(context.RedirectUri);
+            return Task.CompletedTask;
+        };
+        options.Events.OnRedirectToAccessDenied = context =>
+        {
+            if (context.Request.Path.StartsWithSegments("/api"))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return Task.CompletedTask;
+            }
+
+            context.Response.Redirect(context.RedirectUri);
+            return Task.CompletedTask;
+        };
+        options.Events.OnValidatePrincipal = async context =>
+        {
+            var verifier = context.HttpContext.RequestServices.GetRequiredService<AdminCredentialVerifier>();
+            if (verifier.IsCurrentSession(context.Principal))
+            {
+                return;
+            }
+
+            context.RejectPrincipal();
+            await context.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        };
+    });
+builder.Services.AddAuthorization();
+
+var configuredDataPath = Path.GetFullPath(
+    builder.Configuration[$"{StorageOptions.SectionName}:DataPath"] ?? "/data");
+builder.Services
+    .AddDataProtection()
+    .SetApplicationName("LocalMediaService")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(configuredDataPath, "keys")));
+
+builder.Services.AddAntiforgery(options =>
+{
+    options.HeaderName = "X-CSRF-TOKEN";
+    options.Cookie.Name = "LocalMediaService.Csrf";
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.Cookie.SecurePolicy = requireHttps
+        ? CookieSecurePolicy.Always
+        : CookieSecurePolicy.SameAsRequest;
+});
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 5,
+            QueueLimit = 0,
+            Window = TimeSpan.FromMinutes(1),
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("reveal", context => RateLimitPartition.GetFixedWindowLimiter(
+        $"{context.User.Identity?.Name ?? "anonymous"}:{context.Connection.RemoteIpAddress}",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 3,
+            QueueLimit = 0,
+            Window = TimeSpan.FromMinutes(5),
+            AutoReplenishment = true
+        }));
+});
+
+builder.Services.AddProblemDetails();
+builder.Services.AddSingleton<AdminCredentialVerifier>();
+builder.Services.AddSingleton<CredentialEncryption>();
+builder.Services.AddSingleton<EncryptedCredentialStore>();
+builder.Services.AddSingleton<MediaLibrary>();
+builder.Services.AddSingleton<StreamingServiceCatalog>();
+
+var app = builder.Build();
+
+var storageOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageOptions>>().Value;
+var storagePath = Path.GetFullPath(storageOptions.DataPath);
+Directory.CreateDirectory(storagePath);
+Directory.CreateDirectory(Path.Combine(storagePath, "keys"));
+
+app.UseExceptionHandler();
+var forwardedHeadersOptions = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+    ForwardLimit = 1
 };
-
-app.MapGet("/", () => Results.Content("""
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Local Media Service</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 2rem; background: #0f172a; color: #e2e8f0; }
-        h1, h2 { color: #f8fafc; }
-        .platforms { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 2rem; }
-        a.platform { text-decoration: none; color: #0f172a; background: #38bdf8; padding: 0.6rem 1rem; border-radius: 8px; font-weight: 600; }
-        a.platform:hover { background: #7dd3fc; }
-        .video-list { display: grid; gap: 0.75rem; }
-        .video-card { background: #1e293b; border-radius: 8px; padding: 1rem; }
-        .video-card h3 { margin-top: 0; }
-        video { width: 100%; max-width: 900px; border-radius: 6px; background: black; }
-    </style>
-</head>
-<body>
-    <h1>Local Media Service</h1>
-    <p>One place for your streaming platforms and local media playback.</p>
-
-    <h2>Streaming platforms</h2>
-    <div class="platforms">
-        <a class="platform" href="https://www.netflix.com" target="_blank" rel="noreferrer">Netflix</a>
-        <a class="platform" href="https://www.primevideo.com" target="_blank" rel="noreferrer">Prime Video</a>
-        <a class="platform" href="https://www.disneyplus.com" target="_blank" rel="noreferrer">Disney+</a>
-        <a class="platform" href="https://tv.apple.com" target="_blank" rel="noreferrer">Apple TV+</a>
-        <a class="platform" href="https://www.max.com" target="_blank" rel="noreferrer">Max</a>
-    </div>
-
-    <h2>Local videos</h2>
-    <p>Mount your media library into <code>/media</code> (or set <code>MEDIA_ROOT</code>) in Docker.</p>
-    <div id="videos" class="video-list">Loading videos...</div>
-
-    <script>
-        const container = document.getElementById('videos');
-        fetch('/api/videos')
-            .then(r => r.json())
-            .then(videos => {
-                if (!videos.length) {
-                    container.innerHTML = '<div class="video-card">No local videos found.</div>';
-                    return;
-                }
-
-                container.innerHTML = videos.map(v => {
-                    const safeTitle = v.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-                    const encodedPath = v.split('/').map(encodeURIComponent).join('/');
-                    return `
-                        <div class="video-card">
-                            <h3>${safeTitle}</h3>
-                            <video controls preload="metadata" src="/videos/${encodedPath}"></video>
-                        </div>`;
-                }).join('');
-            })
-            .catch(() => {
-                container.innerHTML = '<div class="video-card">Unable to load videos.</div>';
-            });
-    </script>
-</body>
-</html>
-""", "text/html"));
-
-app.MapGet("/api/videos", () =>
+if (builder.Configuration.GetValue<bool>("ReverseProxy:TrustForwardedHeaders"))
 {
-    if (!Directory.Exists(mediaRoot))
+    forwardedHeadersOptions.KnownIPNetworks.Clear();
+    forwardedHeadersOptions.KnownProxies.Clear();
+}
+app.UseForwardedHeaders(forwardedHeadersOptions);
+
+app.Use(async (context, next) =>
+{
+    if (requireHttps &&
+        !context.Request.IsHttps &&
+        !context.Request.Path.StartsWithSegments("/health"))
     {
-        return Results.Ok(Array.Empty<string>());
+        context.Response.StatusCode = StatusCodes.Status426UpgradeRequired;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            title = "HTTPS is required.",
+            status = StatusCodes.Status426UpgradeRequired
+        });
+        return;
     }
 
-    var files = Directory
-        .EnumerateFiles(mediaRoot, "*.*", SearchOption.AllDirectories)
-        .Where(path => allowedExtensions.Contains(Path.GetExtension(path)))
-        .Select(path => Path.GetRelativePath(mediaRoot, path).Replace('\\', '/'))
-        .OrderBy(path => path)
-        .ToArray();
-
-    return Results.Ok(files);
+    await next();
 });
 
-app.MapGet("/videos/{**filePath}", (string filePath) =>
+app.Use(async (context, next) =>
 {
-    if (string.IsNullOrWhiteSpace(filePath))
+    context.Response.OnStarting(() =>
     {
-        return Results.NotFound();
-    }
+        var headers = context.Response.Headers;
+        headers.TryAdd("Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'");
+        headers.TryAdd("Referrer-Policy", "no-referrer");
+        headers.TryAdd("X-Content-Type-Options", "nosniff");
+        headers.TryAdd("X-Frame-Options", "DENY");
+        headers.TryAdd("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+        return Task.CompletedTask;
+    });
 
-    var decodedPath = WebUtility.UrlDecode(filePath);
-    var fullPath = Path.GetFullPath(Path.Combine(mediaRoot, decodedPath));
-    var fullRootPath = Path.GetFullPath(mediaRoot);
-    var fullRootPathWithSeparator = fullRootPath.EndsWith(Path.DirectorySeparatorChar)
-        ? fullRootPath
-        : fullRootPath + Path.DirectorySeparatorChar;
-
-    if (!fullPath.StartsWith(fullRootPathWithSeparator, StringComparison.Ordinal))
-    {
-        return Results.BadRequest("Invalid path.");
-    }
-
-    if (!File.Exists(fullPath) || !allowedExtensions.Contains(Path.GetExtension(fullPath)))
-    {
-        return Results.NotFound();
-    }
-
-    return Results.File(fullPath, enableRangeProcessing: true);
+    await next();
 });
 
-app.Run();
+app.UseStaticFiles();
+app.UseAuthentication();
+app.UseRateLimiter();
+app.UseAuthorization();
+app.UseAntiforgery();
+
+app.MapPortalEndpoints();
+
+await app.RunAsync();
+return 0;
+
+static async Task<int> RunHealthCheckAsync(string url)
+{
+    if (!Uri.TryCreate(url, UriKind.Absolute, out var healthUri) ||
+        healthUri.Scheme is not ("http" or "https"))
+    {
+        return 2;
+    }
+
+    try
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        using var response = await client.GetAsync(healthUri);
+        return response.StatusCode == HttpStatusCode.OK ? 0 : 1;
+    }
+    catch
+    {
+        return 1;
+    }
+}
+
+public partial class Program;

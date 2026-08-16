@@ -1,12 +1,106 @@
+name: local-media-service
+
 services:
-  localmediaservice:
+  gateway:
+    build:
+      context: ./LocalMediaService.Gateway
+      dockerfile: Dockerfile
+    image: local-media-service-gateway:latest
+    depends_on:
+      portal:
+        condition: service_healthy
+    ports:
+      - "${LOCAL_MEDIA_BIND:-0.0.0.0}:${LOCAL_MEDIA_PORT:-8092}:8092"
+    environment:
+      LOCAL_MEDIA_HOST: "${LOCAL_MEDIA_HOST:?Set LOCAL_MEDIA_HOST in .env}"
+      TZ: "${TZ:-Europe/Oslo}"
+    volumes:
+      - type: volume
+        source: gateway-data
+        target: /data
+      - type: volume
+        source: gateway-config
+        target: /config
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error --insecure --resolve $${LOCAL_MEDIA_HOST}:8092:127.0.0.1 https://$${LOCAL_MEDIA_HOST}:8092/health/ready >/dev/null"]
+      interval: 30s
+      timeout: 7s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - local-media
+
+  portal:
     build:
       context: ./LocalMediaService.Web
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+    image: local-media-service:latest
     environment:
-      - MEDIA_ROOT=/media
+      ASPNETCORE_ENVIRONMENT: Production
+      MediaLibrary__RootPath: /media
+      Storage__DataPath: /data
+      PortalSecurity__AdminUsername: "${LMS_ADMIN_USERNAME:-admin}"
+      PortalSecurity__AdminPassword: "${LMS_ADMIN_PASSWORD:?Set LMS_ADMIN_PASSWORD in .env}"
+      PortalSecurity__RequireHttps: "true"
+      CredentialStore__EncryptionKey: "${LMS_CREDENTIAL_KEY:?Set LMS_CREDENTIAL_KEY in .env}"
+      ReverseProxy__TrustForwardedHeaders: "true"
+      TZ: "${TZ:-Europe/Oslo}"
+    expose:
+      - "8080"
     volumes:
-      - ./media:/media:ro
+      - type: bind
+        source: "${MEDIA_PATH:?Set MEDIA_PATH in .env}"
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: portal-data
+        target: /data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "dotnet", "LocalMediaService.Web.dll", "--healthcheck", "http://127.0.0.1:8080/health/ready"]
+      interval: 30s
+      timeout: 7s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
+    stop_grace_period: 20s
+    logging: *default-logging
+    networks:
+      - local-media
+
+volumes:
+  gateway-data:
+    name: local-media-service-gateway-data
+  gateway-config:
+    name: local-media-service-gateway-config
+  portal-data:
+    name: local-media-service-data
+
+networks:
+  local-media:
+    name: local-media-service-network
+    driver: bridge

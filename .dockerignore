@@ -2,3 +2,7 @@
 **/obj
 .git
 .gitignore
+.env
+data
+media
+.local-test-data
